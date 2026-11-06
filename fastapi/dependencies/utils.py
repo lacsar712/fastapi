@@ -67,6 +67,14 @@ from fastapi.dependencies.models import (
 )
 from fastapi.exceptions import DependencyScopeError
 from fastapi.logger import logger
+from fastapi.request_policy import (
+    _DEFAULT_VIEW,
+    _ensure_frame_astack,
+    _PolicyCache,
+    _stack_for_scope,
+    _view_for_stack,
+    bind_background_tasks,
+)
 from fastapi.security.oauth2 import SecurityScopes
 from fastapi.types import DependencyCacheKey, UnionType
 from fastapi.utils import create_model_field, get_path_param_names
@@ -663,6 +671,9 @@ async def solve_dependencies(
     assert isinstance(function_astack, AsyncExitStack), (
         "fastapi_function_astack not found in request scope"
     )
+    # Request-bound dependency/background policy stack (never a process
+    # global). Empty stack/missing -> plain FastAPI behavior.
+    policy_stack = _stack_for_scope(request.scope, create=False)
     values: dict[str, Any] = {}
     errors: list[Any] = []
     if response is None:
@@ -670,21 +681,23 @@ async def solve_dependencies(
         del response.headers["content-length"]
         response.status_code = None  # type: ignore
     if dependency_cache is None:
-        dependency_cache = {}
+        dependency_cache = _PolicyCache()
     if _uses_scopes_cache is None:
         _uses_scopes_cache = {}
     for sub_dependant in dependant.dependencies:
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
+        # Read the effective policy frame LIVE for every node of the tree:
+        # pushing a frame after recursion has started must govern subsequent
+        # nodes instead of silently reusing an entry-time snapshot.
+        node_view = (
+            _view_for_stack(policy_stack) if policy_stack is not None else _DEFAULT_VIEW
+        )
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
-        if (
-            dependency_overrides_provider
-            and dependency_overrides_provider.dependency_overrides
-        ):
+        override_mapping = node_view.override_mapping_for(dependency_overrides_provider)
+        if call in override_mapping:
             original_call = sub_dependant.call
-            call = getattr(
-                dependency_overrides_provider, "dependency_overrides", {}
-            ).get(original_call, original_call)
+            call = override_mapping[original_call]
             use_path: str = sub_dependant.path  # type: ignore
             use_sub_dependant = get_dependant(
                 path=use_path,
@@ -714,7 +727,11 @@ async def solve_dependencies(
             dependant=sub_dependant,
             uses_scopes_cache=_uses_scopes_cache,
         )
-        if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
+        if (
+            sub_dependant.use_cache
+            and sub_dependant_cache_key in dependency_cache
+            and node_view.cache_read_allowed(sub_dependant_cache_key)
+        ):
             solved = dependency_cache[sub_dependant_cache_key]
         elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
             use_sub_dependant.call
@@ -722,6 +739,11 @@ async def solve_dependencies(
             use_astack = request_astack
             if sub_dependant.scope == "function":
                 use_astack = function_astack
+            if node_view.captures_generators():
+                # Register on the frame's private stack so response-end
+                # teardown does not close it; it closes at frame pop.
+                assert node_view._frame is not None
+                use_astack = await _ensure_frame_astack(node_view._frame)
             solved = await _solve_generator(
                 dependant=use_sub_dependant,
                 stack=use_astack,
@@ -733,8 +755,7 @@ async def solve_dependencies(
             solved = await run_in_threadpool(call, **solved_result.values)
         if sub_dependant.name is not None:
             values[sub_dependant.name] = solved
-        if sub_dependant_cache_key not in dependency_cache:
-            dependency_cache[sub_dependant_cache_key] = solved
+        node_view.store_solved(dependency_cache, sub_dependant_cache_key, solved)
     path_values, path_errors = request_params_to_args(
         dependant.path_params, request.path_params
     )
@@ -775,6 +796,7 @@ async def solve_dependencies(
     if dependant.background_tasks_param_name:
         if background_tasks is None:
             background_tasks = BackgroundTasks()
+            bind_background_tasks(background_tasks, request.scope)
         values[dependant.background_tasks_param_name] = background_tasks
     if dependant.response_param_name:
         values[dependant.response_param_name] = response

@@ -75,6 +75,10 @@ from fastapi.exceptions import (
     ResponseValidationError,
     WebSocketRequestValidationError,
 )
+from fastapi.request_policy import (
+    _current_stack_var,
+    ensure_request_policy_stack,
+)
 from fastapi.sse import (
     _PING_INTERVAL,
     KEEPALIVE_COMMENT,
@@ -145,14 +149,23 @@ def request_response(
         async def app(scope: Scope, receive: Receive, send: Send) -> None:
             # Starts customization
             response_awaited = False
-            async with AsyncExitStack() as request_stack:
-                scope["fastapi_inner_astack"] = request_stack
-                async with AsyncExitStack() as function_stack:
-                    scope["fastapi_function_astack"] = function_stack
-                    response = await f(request)
-                await response(scope, receive, send)
-                # Continues customization
-                response_awaited = True
+            # Bind the request-scoped dependency/background policy stack and
+            # mirror it in a contextvar for nested calls without a Request
+            # handle. Each ASGI request gets its own object; concurrent
+            # requests never share stacks.
+            policy_stack = ensure_request_policy_stack(scope)
+            policy_token = _current_stack_var.set(policy_stack)
+            try:
+                async with AsyncExitStack() as request_stack:
+                    scope["fastapi_inner_astack"] = request_stack
+                    async with AsyncExitStack() as function_stack:
+                        scope["fastapi_function_astack"] = function_stack
+                        response = await f(request)
+                    await response(scope, receive, send)
+                    # Continues customization
+                    response_awaited = True
+            finally:
+                _current_stack_var.reset(policy_token)
             if not response_awaited:
                 raise FastAPIError(
                     "Response not awaited. There's a high chance that the "
@@ -182,11 +195,18 @@ def websocket_session(
         session = WebSocket(scope, receive=receive, send=send)
 
         async def app(scope: Scope, receive: Receive, send: Send) -> None:
-            async with AsyncExitStack() as request_stack:
-                scope["fastapi_inner_astack"] = request_stack
-                async with AsyncExitStack() as function_stack:
-                    scope["fastapi_function_astack"] = function_stack
-                    await func(session)
+            # Bind the per-connection policy stack before dependency solving
+            # and mirror it in a contextvar for the endpoint/nested calls.
+            policy_stack = ensure_request_policy_stack(scope)
+            policy_token = _current_stack_var.set(policy_stack)
+            try:
+                async with AsyncExitStack() as request_stack:
+                    scope["fastapi_inner_astack"] = request_stack
+                    async with AsyncExitStack() as function_stack:
+                        scope["fastapi_function_astack"] = function_stack
+                        await func(session)
+            finally:
+                _current_stack_var.reset(policy_token)
 
         # Same as in Starlette
         await wrap_app_handling_exceptions(app, session)(scope, receive, send)
