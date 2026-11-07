@@ -67,7 +67,7 @@ from fastapi.dependencies.utils import (
     get_typed_return_annotation,
     solve_dependencies,
 )
-from fastapi.encoders import jsonable_encoder
+from fastapi.encoders import _jsonable_encoder
 from fastapi.exceptions import (
     EndpointContext,
     FastAPIError,
@@ -75,6 +75,7 @@ from fastapi.exceptions import (
     ResponseValidationError,
     WebSocketRequestValidationError,
 )
+from fastapi.runtime_policy import admit_serialization
 from fastapi.sse import (
     _PING_INTERVAL,
     KEEPALIVE_COMMENT,
@@ -331,6 +332,11 @@ async def serialize_response(
     endpoint_ctx: EndpointContext | None = None,
     dump_json: bool = False,
 ) -> Any:
+    # Request runtime policy gate for turning the return value into a
+    # response body.  Covers the Pydantic serialize/serialize_json paths and
+    # the jsonable_encoder fallback; consulted before any validation or
+    # rendering starts, so an in-flight serialization is never interrupted.
+    admit_serialization("response")
     if field:
         if is_coroutine:
             value, errors = field.validate(response_content, {}, loc=("response",))
@@ -357,7 +363,7 @@ async def serialize_response(
         )
 
     else:
-        return jsonable_encoder(response_content)
+        return _jsonable_encoder(response_content)
 
 
 async def run_endpoint_function(
@@ -526,6 +532,10 @@ def get_request_handler(
             # Validates against stream_item_field when set, then
             # serializes to JSON bytes.
             def _serialize_data(data: Any) -> bytes:
+                # One new serialization per streamed item: re-reads the
+                # current stack top on every item, so a frame pushed while
+                # the stream is open only constrains subsequent items.
+                admit_serialization("stream_item")
                 if stream_item_field:
                     value, errors_ = stream_item_field.validate(
                         data, {}, loc=("response",)
@@ -547,7 +557,7 @@ def get_request_handler(
                         exclude_none=response_model_exclude_none,
                     )
                 else:
-                    data = jsonable_encoder(data)
+                    data = _jsonable_encoder(data)
                     return json.dumps(_normalize_non_finite_floats(data)).encode(
                         "utf-8"
                     )
@@ -563,14 +573,18 @@ def get_request_handler(
                         # For ServerSentEvent items we skip stream_item_field
                         # validation (the user may mix types intentionally).
                         if item.raw_data is not None:
+                            # Pre-formatted payload: no serialization happens,
+                            # so the serialize gate is not consulted.
                             data_str: str | None = item.raw_data
                         elif item.data is not None:
+                            # One new serialization per serialized event.
+                            admit_serialization("sse_item")
                             if hasattr(item.data, "model_dump_json"):
                                 data_str = item.data.model_dump_json()
                             else:
                                 data_str = json.dumps(
                                     _normalize_non_finite_floats(
-                                        jsonable_encoder(item.data)
+                                        _jsonable_encoder(item.data)
                                     )
                                 )
                         else:

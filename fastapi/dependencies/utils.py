@@ -67,6 +67,7 @@ from fastapi.dependencies.models import (
 )
 from fastapi.exceptions import DependencyScopeError
 from fastapi.logger import logger
+from fastapi.runtime_policy import admit_dependency
 from fastapi.security.oauth2 import SecurityScopes
 from fastapi.types import DependencyCacheKey, UnionType
 from fastapi.utils import create_model_field, get_path_param_names
@@ -677,6 +678,12 @@ async def solve_dependencies(
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
+        # Request runtime policy gate: consulted once per dependency edge,
+        # before entering the subtree (which includes security dependencies
+        # and parameterless path dependencies).  A dependency whose own
+        # computation already started is past this point and is never
+        # cancelled or rewritten by a later push.
+        admit_dependency()
         if (
             dependency_overrides_provider
             and dependency_overrides_provider.dependency_overrides

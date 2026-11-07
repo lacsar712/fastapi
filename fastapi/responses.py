@@ -2,6 +2,7 @@ import importlib
 from typing import Any, Protocol, cast
 
 from fastapi.exceptions import FastAPIDeprecationWarning
+from fastapi.runtime_policy import admit_serialization
 from fastapi.sse import EventSourceResponse as EventSourceResponse  # noqa
 from starlette.responses import FileResponse as FileResponse  # noqa
 from starlette.responses import HTMLResponse as HTMLResponse  # noqa
@@ -63,6 +64,7 @@ class UJSONResponse(JSONResponse):
 
     def render(self, content: Any) -> bytes:
         assert ujson is not None, "ujson must be installed to use UJSONResponse"
+        admit_serialization("ujson_render")
         return ujson.dumps(content, ensure_ascii=False).encode("utf-8")
 
 
@@ -93,6 +95,7 @@ class ORJSONResponse(JSONResponse):
 
     def render(self, content: Any) -> bytes:
         assert orjson is not None, "orjson must be installed to use ORJSONResponse"
+        admit_serialization("orjson_render")
         return orjson.dumps(
             content, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY
         )

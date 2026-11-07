@@ -20,6 +20,7 @@ from uuid import UUID
 
 from annotated_doc import Doc
 from fastapi.exceptions import PydanticV1NotSupportedError
+from fastapi.runtime_policy import admit_serialization
 from fastapi.types import IncEx
 from pydantic import BaseModel
 from pydantic.networks import AnyUrl, NameEmail
@@ -126,7 +127,7 @@ def generate_encoders_by_class_tuples(
 encoders_by_class_tuples = generate_encoders_by_class_tuples(ENCODERS_BY_TYPE)
 
 
-def jsonable_encoder(
+def _jsonable_encoder(
     obj: Annotated[
         Any,
         Doc(
@@ -250,7 +251,7 @@ def jsonable_encoder(
             exclude_none=exclude_none,
             exclude_defaults=exclude_defaults,
         )
-        return jsonable_encoder(
+        return _jsonable_encoder(
             obj_dict,
             exclude_none=exclude_none,
             exclude_defaults=exclude_defaults,
@@ -259,7 +260,7 @@ def jsonable_encoder(
     if dataclasses.is_dataclass(obj):
         assert not isinstance(obj, type)
         obj_dict = dataclasses.asdict(obj)
-        return jsonable_encoder(
+        return _jsonable_encoder(
             obj_dict,
             include=include,
             exclude=exclude,
@@ -295,7 +296,7 @@ def jsonable_encoder(
                 and (value is not None or not exclude_none)
                 and key in allowed_keys
             ):
-                encoded_key = jsonable_encoder(
+                encoded_key = _jsonable_encoder(
                     key,
                     by_alias=by_alias,
                     exclude_unset=exclude_unset,
@@ -304,7 +305,7 @@ def jsonable_encoder(
                     custom_encoder=custom_encoder,
                     sqlalchemy_safe=sqlalchemy_safe,
                 )
-                encoded_value = jsonable_encoder(
+                encoded_value = _jsonable_encoder(
                     value,
                     by_alias=by_alias,
                     exclude_unset=exclude_unset,
@@ -319,7 +320,7 @@ def jsonable_encoder(
         encoded_list = []
         for item in obj:
             encoded_list.append(
-                jsonable_encoder(
+                _jsonable_encoder(
                     item,
                     include=include,
                     exclude=exclude,
@@ -353,8 +354,129 @@ def jsonable_encoder(
         except Exception as e:
             errors.append(e)
             raise ValueError(errors) from e
-    return jsonable_encoder(
+    return _jsonable_encoder(
         data,
+        include=include,
+        exclude=exclude,
+        by_alias=by_alias,
+        exclude_unset=exclude_unset,
+        exclude_defaults=exclude_defaults,
+        exclude_none=exclude_none,
+        custom_encoder=custom_encoder,
+        sqlalchemy_safe=sqlalchemy_safe,
+    )
+
+
+def jsonable_encoder(
+    obj: Annotated[
+        Any,
+        Doc(
+            """
+            The input object to convert to JSON.
+            """
+        ),
+    ],
+    include: Annotated[
+        IncEx | None,
+        Doc(
+            """
+            Pydantic's `include` parameter, passed to Pydantic models to set the
+            fields to include.
+            """
+        ),
+    ] = None,
+    exclude: Annotated[
+        IncEx | None,
+        Doc(
+            """
+            Pydantic's `exclude` parameter, passed to Pydantic models to set the
+            fields to exclude.
+            """
+        ),
+    ] = None,
+    by_alias: Annotated[
+        bool,
+        Doc(
+            """
+            Pydantic's `by_alias` parameter, passed to Pydantic models to define if
+            the output should use the alias names (when provided) or the Python
+            attribute names. In an API, if you set an alias, it's probably because
+            you want to use it in the result, so you probably want to leave this
+            set to `True`.
+            """
+        ),
+    ] = True,
+    exclude_unset: Annotated[
+        bool,
+        Doc(
+            """
+            Pydantic's `exclude_unset` parameter, passed to Pydantic models to
+            define if it should exclude from the output the fields that were not
+            explicitly set (and that only had their default values).
+            """
+        ),
+    ] = False,
+    exclude_defaults: Annotated[
+        bool,
+        Doc(
+            """
+            Pydantic's `exclude_defaults` parameter, passed to Pydantic models to
+            define if it should exclude from the output the fields that had the
+            same default value, even when they were explicitly set.
+            """
+        ),
+    ] = False,
+    exclude_none: Annotated[
+        bool,
+        Doc(
+            """
+            Pydantic's `exclude_none` parameter, passed to Pydantic models to
+            define if it should exclude from the output any fields that have a
+            `None` value.
+            """
+        ),
+    ] = False,
+    custom_encoder: Annotated[
+        dict[Any, Callable[[Any], Any]] | None,
+        Doc(
+            """
+            Pydantic's `custom_encoder` parameter, passed to Pydantic models to
+            define a custom encoder.
+            """
+        ),
+    ] = None,
+    sqlalchemy_safe: Annotated[
+        bool,
+        Doc(
+            """
+            Exclude from the output any fields that start with the name `_sa`.
+
+            This is mainly a hack for compatibility with SQLAlchemy objects,
+            they store internal SQLAlchemy-specific state in attributes named
+            with `_sa`, and those objects can't (and shouldn't be) serialized to
+            JSON.
+            """
+        ),
+    ] = True,
+) -> Any:
+    """
+    Convert any object to something that can be encoded in JSON.
+
+    This is used internally by FastAPI to make sure anything you return can be
+    encoded as JSON before it is sent to the client.
+
+    You can also use it yourself, for example to convert objects before saving
+    them in a database that supports only JSON.
+
+    Read more about it in the
+    [FastAPI docs for JSON Compatible Encoder](https://fastapi.tiangolo.com/tutorial/encoder/).
+    """
+    # Request runtime policy gate: consulted once per public encoder entry.
+    # The recursive walk below goes through _jsonable_encoder directly, so an
+    # in-flight encoding is never truncated by a frame pushed afterwards.
+    admit_serialization("jsonable_encoder")
+    return _jsonable_encoder(
+        obj,
         include=include,
         exclude=exclude,
         by_alias=by_alias,

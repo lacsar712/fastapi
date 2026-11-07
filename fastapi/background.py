@@ -2,6 +2,7 @@ from collections.abc import Callable
 from typing import Annotated, Any
 
 from annotated_doc import Doc
+from fastapi.runtime_policy import background_task_is_cancelled
 from fastapi.telemetry._api import _operation
 from starlette.background import BackgroundTasks as StarletteBackgroundTasks
 from typing_extensions import ParamSpec
@@ -63,5 +64,9 @@ class BackgroundTasks(StarletteBackgroundTasks):
 
     async def __call__(self) -> None:
         for task in self.tasks:
+            # Withdrawn by a popped force_cancel policy frame; the
+            # observable cancellation record was produced at pop time.
+            if background_task_is_cancelled(task):
+                continue
             with _operation(name="background_task", function=task.func):
                 await task()
