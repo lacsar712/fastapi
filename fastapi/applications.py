@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, TypeVar
 from annotated_doc import Doc
 from fastapi import routing
 from fastapi.datastructures import Default, DefaultPlaceholder
+from fastapi.dependency_policy import DependencyPolicyFinalizeMiddleware
 from fastapi.exception_handlers import (
     http_exception_handler,
     request_validation_exception_handler,
@@ -1044,6 +1045,10 @@ class FastAPI(Starlette):
 
         middleware = (
             [
+                # Outermost safety net for request-scoped dependency policy
+                # frames: pop (and close owned generator stacks) on any exit,
+                # including exceptions, after user middleware ran.
+                Middleware(DependencyPolicyFinalizeMiddleware),
                 Middleware(ServerErrorMiddleware, handler=error_handler, debug=debug),
                 Middleware(ExceptionTelemetryMiddleware),
             ]

@@ -7,6 +7,23 @@ from starlette import status as status
 from .applications import FastAPI as FastAPI
 from .background import BackgroundTasks as BackgroundTasks
 from .datastructures import UploadFile as UploadFile
+from .dependency_policy import AstackRelease as AstackRelease
+from .dependency_policy import DependencyPolicyError as DependencyPolicyError
+from .dependency_policy import EffectiveDependencyPolicy as EffectiveDependencyPolicy
+from .dependency_policy import OverrideLatch as OverrideLatch
+from .dependency_policy import SolveReuse as SolveReuse
+from .dependency_policy import TaskAdmit as TaskAdmit
+from .dependency_policy import TaskRefusedError as TaskRefusedError
+from .dependency_policy import dependency_policy as dependency_policy
+from .dependency_policy import (
+    get_effective_dependency_policy as get_effective_dependency_policy,
+)
+from .dependency_policy import (
+    pop_dependency_policy as pop_dependency_policy,
+)
+from .dependency_policy import (
+    push_dependency_policy as push_dependency_policy,
+)
 from .exceptions import HTTPException as HTTPException
 from .exceptions import WebSocketException as WebSocketException
 from .param_functions import Body as Body

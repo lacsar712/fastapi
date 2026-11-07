@@ -65,6 +65,13 @@ from fastapi.dependencies.models import (
     _is_gen_callable,
     _UsesScopesCache,
 )
+from fastapi.dependency_policy import (
+    bind_background_tasks,
+    cache_lookup,
+    cache_store,
+    effective_overrides_mapping,
+    generator_astack,
+)
 from fastapi.exceptions import DependencyScopeError
 from fastapi.logger import logger
 from fastapi.security.oauth2 import SecurityScopes
@@ -677,14 +684,15 @@ async def solve_dependencies(
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
-        if (
-            dependency_overrides_provider
-            and dependency_overrides_provider.dependency_overrides
-        ):
+        # The policy stack is read live for every sub-dependency: a frame pushed
+        # while recursion is in progress takes effect for the remaining solving
+        # instead of silently reusing an entry-time snapshot.
+        policy_overrides = effective_overrides_mapping(
+            request.scope, dependency_overrides_provider
+        )
+        if policy_overrides:
             original_call = sub_dependant.call
-            call = getattr(
-                dependency_overrides_provider, "dependency_overrides", {}
-            ).get(original_call, original_call)
+            call = policy_overrides.get(original_call, original_call)
             use_path: str = sub_dependant.path  # type: ignore
             use_sub_dependant = get_dependant(
                 path=use_path,
@@ -714,14 +722,23 @@ async def solve_dependencies(
             dependant=sub_dependant,
             uses_scopes_cache=_uses_scopes_cache,
         )
-        if sub_dependant.use_cache and sub_dependant_cache_key in dependency_cache:
-            solved = dependency_cache[sub_dependant_cache_key]
+        cache_hit, cached_value = cache_lookup(
+            request.scope,
+            dependency_cache,
+            sub_dependant_cache_key,
+            dependant_use_cache=sub_dependant.use_cache,
+        )
+        if cache_hit:
+            solved = cached_value
         elif _is_gen_callable(use_sub_dependant.call) or _is_async_gen_callable(
             use_sub_dependant.call
         ):
-            use_astack = request_astack
-            if sub_dependant.scope == "function":
-                use_astack = function_astack
+            use_astack = generator_astack(
+                request.scope,
+                is_function_scope=sub_dependant.scope == "function",
+                request_astack=request_astack,
+                function_astack=function_astack,
+            )
             solved = await _solve_generator(
                 dependant=use_sub_dependant,
                 stack=use_astack,
@@ -733,8 +750,13 @@ async def solve_dependencies(
             solved = await run_in_threadpool(call, **solved_result.values)
         if sub_dependant.name is not None:
             values[sub_dependant.name] = solved
-        if sub_dependant_cache_key not in dependency_cache:
-            dependency_cache[sub_dependant_cache_key] = solved
+        cache_store(
+            request.scope,
+            dependency_cache,
+            sub_dependant_cache_key,
+            solved,
+            dependant_use_cache=sub_dependant.use_cache,
+        )
     path_values, path_errors = request_params_to_args(
         dependant.path_params, request.path_params
     )
@@ -775,6 +797,7 @@ async def solve_dependencies(
     if dependant.background_tasks_param_name:
         if background_tasks is None:
             background_tasks = BackgroundTasks()
+            bind_background_tasks(request.scope, background_tasks)
         values[dependant.background_tasks_param_name] = background_tasks
     if dependant.response_param_name:
         values[dependant.response_param_name] = response
